@@ -1,7 +1,15 @@
 // api/webhook.js
 const crypto = require("crypto");
 
-const TTL_MS = 15 * 60 * 1000; // 15 min
+/**
+ * ENV required:
+ * - LINE_CHANNEL_ACCESS_TOKEN
+ * - LINE_CHANNEL_SECRET
+ * Optional:
+ * - ADMIN_USER_ID
+ */
+
+const TTL_MS = 15 * 60 * 1000; // 15 นาที
 const stateStore = new Map();
 
 function now() {
@@ -11,18 +19,14 @@ function now() {
 function cleanupTTL() {
   const t = now();
   for (const [k, v] of stateStore.entries()) {
-    if (t - v.updatedAt > TTL_MS) stateStore.delete(k);
+    if (!v?.updatedAt || t - v.updatedAt > TTL_MS) stateStore.delete(k);
   }
 }
 
 function setState(userId, patch) {
   cleanupTTL();
   const prev = stateStore.get(userId) || { step: 1 };
-  const next = {
-    ...prev,
-    ...patch,
-    updatedAt: now(),
-  };
+  const next = { ...prev, ...patch, updatedAt: now() };
   stateStore.set(userId, next);
   return next;
 }
@@ -30,13 +34,6 @@ function setState(userId, patch) {
 function getState(userId) {
   cleanupTTL();
   return stateStore.get(userId);
-}
-
-function parsePostbackData(dataStr) {
-  const params = new URLSearchParams(dataStr);
-  const obj = {};
-  for (const [k, v] of params.entries()) obj[k] = v;
-  return obj;
 }
 
 async function readRawBody(req) {
@@ -53,8 +50,16 @@ function verifyLineSignature(rawBody, signature) {
   const hash = crypto.createHmac("sha256", secret).update(rawBody).digest("base64");
   const a = Buffer.from(hash);
   const b = Buffer.from(signature);
+
   if (a.length !== b.length) return false;
   return crypto.timingSafeEqual(a, b);
+}
+
+function parsePostbackData(dataStr) {
+  const params = new URLSearchParams(dataStr);
+  const obj = {};
+  for (const [k, v] of params.entries()) obj[k] = v;
+  return obj;
 }
 
 async function lineReply(replyToken, messages) {
@@ -105,7 +110,7 @@ function petLabel(t) {
   return "-";
 }
 
-/** ---------- FLEX ---------- */
+/** ---------- FLEX builders ---------- */
 function flexChooseService() {
   return {
     type: "flex",
@@ -122,6 +127,7 @@ function flexChooseService() {
           { type: "button", style: "primary", action: { type: "postback", label: "ฝากเลี้ยง", data: "ACTION=SERVICE&SERVICE=BOARDING" } },
           { type: "button", action: { type: "postback", label: "รับ–ส่งสัตว์เลี้ยง", data: "ACTION=SERVICE&SERVICE=TRANSPORT" } },
           { type: "button", action: { type: "postback", label: "พาไปหาหมอ", data: "ACTION=SERVICE&SERVICE=VET" } },
+          { type: "button", action: { type: "postback", label: "ยกเลิก", data: "ACTION=CANCEL" } },
         ],
       },
     },
@@ -147,6 +153,7 @@ function flexPickDate() {
             action: { type: "datetimepicker", label: "เลือกวัน", mode: "date", data: "ACTION=DATE" },
           },
           { type: "button", action: { type: "postback", label: "เริ่มใหม่", data: "ACTION=RESET" } },
+          { type: "button", action: { type: "postback", label: "ยกเลิก", data: "ACTION=CANCEL" } },
         ],
       },
     },
@@ -170,6 +177,7 @@ function flexPickRoom() {
           { type: "button", action: { type: "postback", label: "Deluxe", data: "ACTION=ROOM&ROOM=DELUXE" } },
           { type: "button", action: { type: "postback", label: "VIP", data: "ACTION=ROOM&ROOM=VIP" } },
           { type: "button", action: { type: "postback", label: "เริ่มใหม่", data: "ACTION=RESET" } },
+          { type: "button", action: { type: "postback", label: "ยกเลิก", data: "ACTION=CANCEL" } },
         ],
       },
     },
@@ -212,6 +220,8 @@ function flexPickPet() {
             })),
           },
           { type: "button", height: "sm", action: { type: "postback", label: "4+ ตัว", data: "ACTION=PETCOUNT&PETCOUNT=4" } },
+          { type: "button", action: { type: "postback", label: "เริ่มใหม่", data: "ACTION=RESET" } },
+          { type: "button", action: { type: "postback", label: "ยกเลิก", data: "ACTION=CANCEL" } },
         ],
       },
     },
@@ -262,14 +272,17 @@ function flexSummary(st) {
   };
 }
 
-/** ---------- handler ---------- */
+/** ---------- main handler ---------- */
 module.exports = async (req, res) => {
   try {
+    // LINE จะ POST เท่านั้น
     if (req.method !== "POST") return res.status(405).end();
 
+    // read raw body
     const rawBody = await readRawBody(req);
-    const signature = req.headers["x-line-signature"];
 
+    // verify signature
+    const signature = req.headers["x-line-signature"];
     if (!verifyLineSignature(rawBody, signature)) {
       return res.status(401).send("Invalid signature");
     }
@@ -280,34 +293,27 @@ module.exports = async (req, res) => {
 
     for (const event of events) {
       const replyToken = event.replyToken;
-      const userId = event.source && event.source.userId;
+      const userId = event?.source?.userId;
       if (!replyToken || !userId) continue;
 
-      // -------- POSTBACK --------
+      // ---------- POSTBACK EVENTS ----------
       if (event.type === "postback") {
-        const dataStr = event.postback && event.postback.data ? event.postback.data : "";
+        const dataStr = event?.postback?.data || "";
         const data = parsePostbackData(dataStr);
         const action = data.ACTION;
 
-        // datetimepicker returns params.date
-        const pickedDate = event.postback && event.postback.params ? event.postback.params.date : undefined;
+        // datetimepicker: params.date
+        const pickedDate = event?.postback?.params?.date;
 
-        // BOOK NOW (Rich Menu)
-        if (dataStr === "BOOK_NOW" || action === "BOOKNOW") {
-          setState(userId, { step: 1, service: undefined, date: undefined, room: undefined, petType: undefined, petCount: undefined });
-          await lineReply(replyToken, [flexChooseService()]);
+        if (action === "CANCEL") {
+          stateStore.delete(userId);
+          await lineReply(replyToken, [{ type: "text", text: "ยกเลิกเรียบร้อยครับ 🙏" }]);
           continue;
         }
 
         if (action === "RESET") {
           stateStore.delete(userId);
           await lineReply(replyToken, [{ type: "text", text: "เริ่มใหม่เรียบร้อย ✅" }, flexChooseService()]);
-          continue;
-        }
-
-        if (action === "CANCEL") {
-          stateStore.delete(userId);
-          await lineReply(replyToken, [{ type: "text", text: "ยกเลิกเรียบร้อยครับ 🙏" }]);
           continue;
         }
 
@@ -335,22 +341,24 @@ module.exports = async (req, res) => {
 
         if (action === "PETTYPE") {
           const st = getState(userId) || setState(userId, { step: 4 });
-          setState(userId, { ...st, petType: data.PETTYPE, step: 4 });
+          setState(userId, { ...st, step: 4, petType: data.PETTYPE });
           await lineReply(replyToken, [{ type: "text", text: `เลือกประเภท: ${petLabel(data.PETTYPE)}` }, flexPickPet()]);
           continue;
         }
 
         if (action === "PETCOUNT") {
           const st = getState(userId);
-          if (!st || !st.petType) {
+          if (!st?.petType) {
             await lineReply(replyToken, [{ type: "text", text: "ขอเลือกประเภทสัตว์ก่อนนะครับ" }, flexPickPet()]);
             continue;
           }
+
           const count = Number(data.PETCOUNT || "");
           if (!count || Number.isNaN(count)) {
             await lineReply(replyToken, [{ type: "text", text: "จำนวนไม่ถูกต้อง ลองใหม่ครับ" }, flexPickPet()]);
             continue;
           }
+
           const next = setState(userId, { step: 5, petCount: count });
           await lineReply(replyToken, [flexSummary(next)]);
           continue;
@@ -358,9 +366,9 @@ module.exports = async (req, res) => {
 
         if (action === "CONFIRM") {
           const st = getState(userId);
-          if (!st || !st.service || !st.date || !st.room || !st.petType || !st.petCount) {
-            await lineReply(replyToken, [{ type: "text", text: "ข้อมูลยังไม่ครบครับ ขอเริ่มใหม่ 🙏" }, flexChooseService()]);
+          if (!st?.service || !st?.date || !st?.room || !st?.petType || !st?.petCount) {
             stateStore.delete(userId);
+            await lineReply(replyToken, [{ type: "text", text: "ข้อมูลยังไม่ครบครับ ขอเริ่มใหม่ 🙏" }, flexChooseService()]);
             continue;
           }
 
@@ -369,7 +377,6 @@ module.exports = async (req, res) => {
             flexSummary(st),
           ]);
 
-          // optional notify admin
           const adminId = process.env.ADMIN_USER_ID;
           if (adminId) {
             await linePush(adminId, [
@@ -389,20 +396,36 @@ module.exports = async (req, res) => {
           continue;
         }
 
-        // fallback
+        // fallback postback
         await lineReply(replyToken, [{ type: "text", text: "ขอโทษครับ ระบบยังไม่รองรับปุ่มนี้" }]);
         continue;
       }
 
-      // -------- MESSAGE -------- (ถ้ายังไม่ใช้ ให้ตอบช่วยแนะนำ)
-      if (event.type === "message" && event.message && event.message.type === "text") {
+      // ---------- MESSAGE EVENTS ----------
+      if (event.type === "message" && event.message?.type === "text") {
         const text = (event.message.text || "").trim();
-        if (text === "จอง" || /^book$/i.test(text)) {
-          setState(userId, { step: 1 });
+
+        // ✅ สำคัญ: LIFF ต้องส่งข้อความ "BOOK_NOW" เข้ามา แล้วจะเริ่ม flow ตรงนี้
+        if (text === "BOOK_NOW" || text === "จอง" || /^book$/i.test(text)) {
+          setState(userId, { step: 1, service: undefined, date: undefined, room: undefined, petType: undefined, petCount: undefined });
           await lineReply(replyToken, [flexChooseService()]);
           continue;
         }
-        await lineReply(replyToken, [{ type: "text", text: "พิมพ์ “จอง” หรือกด BOOK NOW เพื่อเริ่มได้เลยครับ" }]);
+
+        // ถ้าพิมพ์มาอย่างอื่นระหว่างทำ flow ให้ช่วยนำทาง
+        const st = getState(userId);
+        if (!st) {
+          await lineReply(replyToken, [{ type: "text", text: "พิมพ์ “จอง” หรือกด BOOK NOW เพื่อเริ่มได้เลยครับ" }]);
+          continue;
+        }
+
+        // ถ้าอยากบังคับให้ใช้ปุ่มเท่านั้น
+        if (st.step === 1) await lineReply(replyToken, [{ type: "text", text: "ขอเลือกบริการจากปุ่มด้านล่างนะครับ" }, flexChooseService()]);
+        else if (st.step === 2) await lineReply(replyToken, [{ type: "text", text: "ขอเลือกวันที่จากปุ่มด้านล่างนะครับ" }, flexPickDate()]);
+        else if (st.step === 3) await lineReply(replyToken, [{ type: "text", text: "ขอเลือกประเภทห้องพักจากปุ่มด้านล่างนะครับ" }, flexPickRoom()]);
+        else if (st.step === 4) await lineReply(replyToken, [{ type: "text", text: "ขอเลือกประเภทสัตว์และจำนวนจากปุ่มด้านล่างนะครับ" }, flexPickPet()]);
+        else await lineReply(replyToken, [{ type: "text", text: "รับทราบครับ" }]);
+
         continue;
       }
     }
@@ -410,7 +433,7 @@ module.exports = async (req, res) => {
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error("WEBHOOK ERROR:", err);
-    // ตอบ 200 กัน LINE ยิงซ้ำรัว
+    // ตอบ 200 เพื่อกัน LINE ยิงซ้ำรัวๆ
     return res.status(200).json({ ok: true });
   }
 };
