@@ -1,154 +1,91 @@
-// /api/book-now.js
 export default async function handler(req, res) {
   // ---- CORS ----
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
+  // handle preflight
   if (req.method === "OPTIONS") return res.status(200).end();
 
   try {
-    // --- 1) รับข้อมูลได้ทั้ง GET และ POST ---
-    const data =
+    // ✅ รองรับ body เป็น string / object
+    const body =
       req.method === "POST"
         ? (typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {}))
-        : (req.query || {});
+        : {};
 
-    const hotel = (data.hotel || "").toString();
-    const area = (data.area || "").toString();
-    const guestName = (data.guestName || "").toString();
-    const guestCount = (data.guestCount || "").toString();
-    const phone = (data.phone || "").toString();
-    const checkIn = (data.checkIn || "").toString();
-    const checkOut = (data.checkOut || "").toString();
-    const nights = (data.nights || "").toString();
-    const roomCount = (data.roomCount || "").toString();
-    const petType = (data.petType || "").toString();
-    const petCount = (data.petCount || "").toString();
+    // ✅ อ่านจาก POST body ก่อน ถ้าไม่มีค่อยอ่านจาก query
+    const hotel = body.hotel ?? req.query.hotel ?? "";
+    const area = body.area ?? req.query.area ?? "";
 
-    // userId: ถ้าเรียกจาก LIFF/เว็บ ให้ส่ง userId มาด้วย (แนะนำ)
-    const userId = (data.userId || "").toString();
+    const guestName = body.guestName ?? req.query.guestName ?? "";
+    const guestCount = Number(body.guestCount ?? req.query.guestCount ?? 0);
 
-    // --- 2) ทำ Flex ให้ดูมืออาชีพ ---
-    const rows = [];
-    const addRow = (label, value) => {
-      if (!value) return;
-      rows.push({
-        type: "box",
-        layout: "baseline",
-        spacing: "sm",
-        contents: [
-          { type: "text", text: label, size: "sm", color: "#6B7280", flex: 3 },
-          { type: "text", text: value, size: "sm", color: "#111827", flex: 7, wrap: true },
-        ],
-      });
-    };
+    const phone = body.phone ?? req.query.phone ?? "";
+    const checkIn = body.checkIn ?? req.query.checkIn ?? "";
+    const checkOut = body.checkOut ?? req.query.checkOut ?? "";
+    const nights = Number(body.nights ?? req.query.nights ?? 0);
 
-    addRow("โรงแรม", hotel);
-    addRow("พื้นที่", area);
-    addRow("ผู้จอง", guestName);
-    addRow("เบอร์โทร", phone);
-    addRow("เช็คอิน", checkIn);
-    addRow("เช็คเอาท์", checkOut);
-    addRow("จำนวนคืน", nights ? `${nights} คืน` : "");
-    addRow("จำนวนห้อง", roomCount ? `${roomCount} ห้อง` : "");
-    addRow("จำนวนผู้เข้าพัก", guestCount ? `${guestCount} คน` : "");
-    addRow("สัตว์เลี้ยง", [petType, petCount ? `${petCount} ตัว` : ""].filter(Boolean).join(" · "));
+    const roomCount = Number(body.roomCount ?? req.query.roomCount ?? 0);
 
-    const altText = `Pet Journey Booking: ${hotel || "รายการจอง"}`;
+    const petType = body.petType ?? req.query.petType ?? "";
+    const petCount = Number(body.petCount ?? req.query.petCount ?? 0);
 
-    const flexMessage = {
-      type: "flex",
-      altText,
-      contents: {
-        type: "bubble",
-        size: "mega",
-        header: {
-          type: "box",
-          layout: "vertical",
-          paddingAll: "20px",
-          contents: [
-            { type: "text", text: "Pet Journey", size: "sm", color: "#6B7280" },
-            { type: "text", text: "Booking Request", size: "xl", weight: "bold", color: "#111827" },
-            { type: "text", text: "กรอกข้อมูลเบื้องต้นเรียบร้อย ✅", size: "sm", color: "#10B981", margin: "md" },
-          ],
-        },
-        body: {
-          type: "box",
-          layout: "vertical",
-          paddingAll: "20px",
-          spacing: "md",
-          contents: [
-            { type: "text", text: "รายละเอียดการจอง", weight: "bold", size: "md", color: "#111827" },
-            { type: "separator" },
-            { type: "box", layout: "vertical", spacing: "sm", margin: "md", contents: rows.length ? rows : [
-              { type: "text", text: "ไม่มีข้อมูลที่ส่งมา", size: "sm", color: "#6B7280" }
-            ]},
-          ],
-        },
-        footer: {
-          type: "box",
-          layout: "vertical",
-          paddingAll: "20px",
-          spacing: "sm",
-          contents: [
-            {
-              type: "text",
-              text: "ขั้นถัดไป: บอทจะถามข้อมูลเพิ่มเติมในแชท",
-              size: "sm",
-              color: "#6B7280",
-              wrap: true,
-            },
-          ],
-        },
-      },
-    };
+    const userId = body.userId ?? req.query.userId ?? "";
 
-    // --- 3) ส่งเข้าแชท (ถ้ามี userId) ---
-    const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-    if (token && userId) {
-      const resp = await fetch("https://api.line.me/v2/bot/message/push", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          to: userId,
-          messages: [flexMessage],
-        }),
-      });
-
-      const text = await resp.text();
-      if (!resp.ok) {
-        // ส่ง push ไม่ผ่าน ยังตอบกลับ API ให้เห็นสาเหตุ
-        return res.status(200).json({
-          ok: false,
-          pushed: false,
-          reason: "LINE push failed",
-          status: resp.status,
-          lineResponse: text,
-          received: { hotel, area, guestName, guestCount, phone, checkIn, checkOut, nights, roomCount, petType, petCount },
-          flex: flexMessage,
-        });
-      }
-
-      return res.status(200).json({
-        ok: true,
-        pushed: true,
-        to: userId,
-        received: { hotel, area, guestName, guestCount, phone, checkIn, checkOut, nights, roomCount, petType, petCount },
-        flex: flexMessage,
-      });
+    // ✅ validation ขั้นต่ำกันพัง
+    if (!hotel || !area) {
+      return res.status(400).json({ ok: false, error: "missing hotel/area" });
     }
 
-    // --- 4) ถ้าไม่มี userId ให้คืน flex กลับไป (อย่างน้อยเห็นว่า payload ถูกต้อง) ---
+    // ✅ response ที่ Lovable/LINE ใช้ต่อได้
     return res.status(200).json({
       ok: true,
-      pushed: false,
-      note: "No userId or no LINE_CHANNEL_ACCESS_TOKEN. Returning flex only.",
-      received: { hotel, area, guestName, guestCount, phone, checkIn, checkOut, nights, roomCount, petType, petCount },
-      flex: flexMessage,
+      data: {
+        hotel,
+        area,
+        guestName,
+        guestCount,
+        phone,
+        checkIn,
+        checkOut,
+        nights,
+        roomCount,
+        petType,
+        petCount,
+        userId,
+      },
+      flex: {
+        type: "flex",
+        altText: `จอง: ${hotel}`,
+        contents: {
+          type: "bubble",
+          body: {
+            type: "box",
+            layout: "vertical",
+            spacing: "sm",
+            contents: [
+              { type: "text", text: "Pet Journey Booking", weight: "bold", size: "lg" },
+              { type: "text", text: `โรงแรม: ${hotel}`, wrap: true },
+              { type: "text", text: `พื้นที่: ${area}`, wrap: true },
+
+              ...(guestName ? [{ type: "text", text: `ชื่อผู้จอง: ${guestName}`, wrap: true }] : []),
+              ...(guestCount ? [{ type: "text", text: `จำนวนผู้เข้าพัก: ${guestCount}`, wrap: true }] : []),
+              ...(roomCount ? [{ type: "text", text: `จำนวนห้อง: ${roomCount}`, wrap: true }] : []),
+
+              ...(checkIn ? [{ type: "text", text: `เช็คอิน: ${checkIn}`, wrap: true }] : []),
+              ...(checkOut ? [{ type: "text", text: `เช็คเอาท์: ${checkOut}`, wrap: true }] : []),
+              ...(nights ? [{ type: "text", text: `จำนวนคืน: ${nights}`, wrap: true }] : []),
+
+              ...(petType ? [{ type: "text", text: `สัตว์เลี้ยง: ${petType}`, wrap: true }] : []),
+              ...(petCount ? [{ type: "text", text: `จำนวนสัตว์เลี้ยง: ${petCount}`, wrap: true }] : []),
+
+              ...(phone ? [{ type: "text", text: `โทร: ${phone}`, wrap: true }] : []),
+              ...(userId ? [{ type: "text", text: `userId: ${userId}`, wrap: true, size: "xs", color: "#999999" }] : []),
+            ],
+          },
+        },
+      },
     });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e) });
